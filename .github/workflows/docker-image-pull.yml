@@ -11,9 +11,58 @@ jobs:
         architecture: [amd64, arm64]
         os: [linux]
         service:
-          - name: runtime:0.1.1
-          - name: muagent:0.1.1
-          - name: ekgfrontend:0.1.0
+          - name: ragflow
+            source: infiniflow/ragflow
+            tag: v0.22.1
+          
+          # 必选基础依赖镜像
+          - name: mysql
+            source: mysql
+            tag: 8.0.39
+          
+          - name: minio
+            source: quay.io/minio/minio
+            tag: RELEASE.2025-06-13T11-33-47Z
+          
+          - name: valkey
+            source: valkey/valkey
+            tag: "8"
+          
+          # 向量/检索引擎
+          - name: elasticsearch
+            source: elasticsearch
+            tag: 8.11.3
+          
+          - name: infinity
+            source: infiniflow/infinity
+            tag: v0.6.11
+          
+          - name: opensearch
+            source: hub.icert.top/opensearchproject/opensearch
+            tag: 2.19.1
+          
+          # 可视化和管理工具
+          - name: kibana
+            source: kibana
+            tag: 8.11.3
+          
+          # 代码执行沙箱
+          - name: sandbox-executor-manager
+            source: infiniflow/sandbox-executor-manager
+            tag: latest
+          
+          - name: sandbox-base-python
+            source: infiniflow/sandbox-base-python
+            tag: latest
+          
+          - name: sandbox-base-nodejs
+            source: infiniflow/sandbox-base-nodejs
+            tag: latest
+          
+          # 数据库替代方案
+          - name: oceanbase-ce
+            source: oceanbase/oceanbase-ce
+            tag: 4.4.1.0-100000032025101610
 
     steps:
       - name: Checkout code
