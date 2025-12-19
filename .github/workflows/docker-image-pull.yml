@@ -93,7 +93,7 @@ jobs:
           
           ARCHITECTURE="amd64"
           SOURCE_IMAGE="${{ matrix.service.source }}:${{ matrix.service.tag }}"
-          TARGET_IMAGE="registry.cn-hangzhou.aliyuncs.com/ragflow/${{ matrix.service.name }}:${{ matrix.service.tag }}-${ARCHITECTURE}"
+          TARGET_IMAGE="registry.cn-hangzhou.aliyuncs.com/muagent_gz/${{ matrix.service.name }}:${{ matrix.service.tag }}-${ARCHITECTURE}"
           
           echo "=========================================="
           echo "Processing: ${{ matrix.service.name }}"
