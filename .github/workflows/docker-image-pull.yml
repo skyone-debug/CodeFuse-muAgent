@@ -11,9 +11,59 @@ jobs:
       matrix:
         architecture: [amd64]
         service:
+          # 核心服务镜像
           - name: ragflow
             source: infiniflow/ragflow
             tag: v0.9.0
+          
+          # 必选基础依赖镜像
+          - name: mysql
+            source: mysql
+            tag: 8.0.39
+          
+          - name: minio
+            source: quay.io/minio/minio
+            tag: RELEASE.2025-06-13T11-33-47Z
+          
+          - name: valkey
+            source: valkey/valkey
+            tag: "8"
+          
+          # 向量/检索引擎（至少选择一个）
+          - name: elasticsearch
+            source: elasticsearch
+            tag: 8.11.3
+          
+          - name: infinity
+            source: infiniflow/infinity
+            tag: v0.6.11
+          
+          - name: opensearch
+            source: hub.icert.top/opensearchproject/opensearch
+            tag: 2.19.1
+          
+          # 可视化和管理工具
+          - name: kibana
+            source: kibana
+            tag: 8.11.3
+          
+          # 代码执行沙箱
+          - name: sandbox-executor-manager
+            source: infiniflow/sandbox-executor-manager
+            tag: latest
+          
+          - name: sandbox-base-python
+            source: infiniflow/sandbox-base-python
+            tag: latest
+          
+          - name: sandbox-base-nodejs
+            source: infiniflow/sandbox-base-nodejs
+            tag: latest
+          
+          # 数据库替代方案
+          - name: oceanbase-ce
+            source: oceanbase/oceanbase-ce
+            tag: 4.4.1.0-100000032025101610
 
     steps:
       - name: Checkout code
@@ -34,9 +84,14 @@ jobs:
           ARCHITECTURE="${{ matrix.architecture }}"
           REGISTRY="crpi-ula1bfbb1264p5ln.cn-hangzhou.personal.cr.aliyuncs.com"
           NAMESPACE="muagent_gz"
-          # 使用正确的源镜像路径（从 Docker Hub 拉取）
+          
+          # 处理包含完整 registry 路径的镜像（如 quay.io/minio/minio）
           SOURCE_IMAGE="${{ matrix.service.source }}:${{ matrix.service.tag }}"
-          TARGET_IMAGE="${REGISTRY}/${NAMESPACE}/${{ matrix.service.name }}:${{ matrix.service.tag }}-${ARCHITECTURE}"
+          
+          # 生成目标镜像名称（处理特殊字符，如 RELEASE.2025-06-13T11-33-47Z）
+          # 对于包含特殊字符的标签，使用原始标签
+          TARGET_TAG="${{ matrix.service.tag }}-${ARCHITECTURE}"
+          TARGET_IMAGE="${REGISTRY}/${NAMESPACE}/${{ matrix.service.name }}:${TARGET_TAG}"
           
           echo "=========================================="
           echo "Processing: ${{ matrix.service.name }}"
