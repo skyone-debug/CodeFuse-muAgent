@@ -19,6 +19,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
+      - name: Initial Docker cleanup
+        run: |
+          echo "=== 初始清理 Docker 空间 ==="
+          docker container prune -f || true
+          docker image prune -a -f || true
+          docker builder prune -a -f || true
+          docker volume prune -f || true
+          docker network prune -f || true
+          echo "=== 磁盘使用情况 ==="
+          df -h
+          docker system df
+      
       - name: Login to Aliyun Container Registry
         uses: docker/login-action@v3
         with:
@@ -59,20 +71,34 @@ jobs:
             exit 1
           fi
           
-          # 拉取源镜像，添加重试机制
+          # 拉取源镜像，添加重试机制和空间清理
           MAX_RETRIES=3
           RETRY_COUNT=0
+          PULL_SUCCESS=false
           
           while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            # 重试前清理空间（第一次已经在初始清理中完成）
+            if [ $RETRY_COUNT -gt 0 ]; then
+              echo "=== 重试前清理 Docker 空间 ==="
+              docker system prune -a -f --volumes || true
+              echo "=== 当前磁盘使用情况 ==="
+              df -h
+              docker system df
+              sleep 5
+            fi
+            
             echo "Attempting to pull: $SOURCE_IMAGE (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)"
+            
+            # 使用 --platform 参数只拉取指定架构，减少空间占用
             if docker pull --platform linux/${ARCHITECTURE} "$SOURCE_IMAGE"; then
               echo "✅ Successfully pulled: $SOURCE_IMAGE"
+              PULL_SUCCESS=true
               break
             else
               RETRY_COUNT=$((RETRY_COUNT + 1))
               if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
                 echo "⚠️ Pull failed, retrying ($RETRY_COUNT/$MAX_RETRIES)..."
-                sleep 5
+                sleep 10
               else
                 echo "❌ Failed to pull $SOURCE_IMAGE after $MAX_RETRIES attempts"
                 echo "Please verify the image exists at: https://hub.docker.com/r/${{ matrix.service.source }}"
@@ -81,16 +107,26 @@ jobs:
             fi
           done
           
+          if [ "$PULL_SUCCESS" = false ]; then
+            echo "❌ Failed to pull image after all retries"
+            exit 1
+          fi
+          
           # 标记镜像
+          echo "=== 标记镜像 ==="
           docker tag "$SOURCE_IMAGE" "$TARGET_IMAGE"
           echo "✅ Tagged: $TARGET_IMAGE"
           
           # 推送镜像到阿里云，添加重试机制
+          echo "=== 推送镜像到阿里云 ==="
           RETRY_COUNT=0
+          PUSH_SUCCESS=false
+          
           while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
             echo "Attempting to push: $TARGET_IMAGE (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)"
             if docker push "$TARGET_IMAGE"; then
               echo "✅ Successfully pushed: $TARGET_IMAGE"
+              PUSH_SUCCESS=true
               break
             else
               RETRY_COUNT=$((RETRY_COUNT + 1))
@@ -99,16 +135,35 @@ jobs:
                 sleep 5
               else
                 echo "❌ Failed to push $TARGET_IMAGE after $MAX_RETRIES attempts"
+                # 推送失败时也清理本地镜像
+                docker rmi "$SOURCE_IMAGE" "$TARGET_IMAGE" || true
                 exit 1
               fi
             fi
           done
           
-          echo "✅ Completed: ${{ matrix.service.name }}"
+          if [ "$PUSH_SUCCESS" = true ]; then
+            # 推送成功后立即删除本地镜像以释放空间
+            echo "=== 清理本地镜像（推送成功） ==="
+            docker rmi "$SOURCE_IMAGE" "$TARGET_IMAGE" || true
+            # 清理未使用的资源
+            docker system prune -f || true
+            echo "✅ Completed: ${{ matrix.service.name }}"
+            echo "=== 清理后磁盘使用情况 ==="
+            df -h
+            docker system df
+          else
+            echo "❌ Failed to push image after all retries"
+            exit 1
+          fi
 
-      - name: Clean up
+      - name: Final cleanup
         if: always()
         run: |
-          echo "Cleaning up Docker system..."
-          docker system prune -af --volumes || true
-          echo "Cleanup completed"
+          echo "=== 最终清理 Docker 系统 ==="
+          docker system prune -a -f --volumes || true
+          echo "=== 最终磁盘使用情况 ==="
+          df -h
+          docker system df
+          echo "✅ Cleanup completed"
+
