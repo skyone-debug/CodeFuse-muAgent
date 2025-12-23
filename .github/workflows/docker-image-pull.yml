@@ -1,34 +1,7 @@
 name: Sync Docker Images to Aliyun
 
 on:
-  workflow_dispatch:
-    inputs:
-      image_name:
-        description: 'Image name to sync (e.g., ragflow)'
-        required: true
-        type: string
-      image_tag:
-        description: 'Image tag (e.g., v0.9.0)'
-        required: true
-        type: string
-      source_registry:
-        description: 'Source registry (default: docker.io)'
-        required: false
-        default: 'docker.io'
-        type: string
-      target_registry:
-        description: 'Target Aliyun registry'
-        required: true
-        type: string
-      target_namespace:
-        description: 'Target namespace'
-        required: true
-        type: string
-      platform:
-        description: 'Platform (e.g., linux/amd64, linux/arm64)'
-        required: false
-        default: 'linux/amd64'
-        type: string
+  workflow_dispatch:  # 允许手动触发工作流
 
 env:
   DOCKER_CLI_EXPERIMENTAL: enabled
@@ -36,32 +9,34 @@ env:
 jobs:
   sync-image:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [amd64]
+        service:
+          - name: ragflow
+            source: infiniflow/ragflow
+            tag: v0.9.0
     steps:
       - name: Set up variables
-        id: vars
         run: |
-          SOURCE_REGISTRY="${{ inputs.source_registry }}"
-          IMAGE_NAME="${{ inputs.image_name }}"
-          IMAGE_TAG="${{ inputs.image_tag }}"
-          TARGET_REGISTRY="${{ inputs.target_registry }}"
-          TARGET_NAMESPACE="${{ inputs.target_namespace }}"
-          PLATFORM="${{ inputs.platform }}"
+          # 硬编码的配置
+          REGISTRY="crpi-ula1bfbb1264p5ln.cn-hangzhou.personal.cr.aliyuncs.com"
+          NAMESPACE="muagent_gz"
+          ARCHITECTURE="${{ matrix.architecture }}"
+          PLATFORM="linux/${ARCHITECTURE}"
           
           # 构建源镜像名称
-          if [ "$SOURCE_REGISTRY" = "docker.io" ]; then
-            SOURCE_IMAGE="infiniflow/${IMAGE_NAME}:${IMAGE_TAG}"
-          else
-            SOURCE_IMAGE="${SOURCE_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
-          fi
+          SOURCE_IMAGE="${{ matrix.service.source }}:${{ matrix.service.tag }}"
           
-          # 构建目标镜像名称（从 platform 中提取架构，如 linux/amd64 -> amd64）
-          ARCH="${PLATFORM#linux/}"
-          TARGET_IMAGE="${TARGET_REGISTRY}/${TARGET_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}-${ARCH}"
+          # 构建目标镜像名称
+          TARGET_TAG="${{ matrix.service.tag }}-${ARCHITECTURE}"
+          TARGET_IMAGE="${REGISTRY}/${NAMESPACE}/${{ matrix.service.name }}:${TARGET_TAG}"
           
           echo "SOURCE_IMAGE=${SOURCE_IMAGE}" >> $GITHUB_ENV
           echo "TARGET_IMAGE=${TARGET_IMAGE}" >> $GITHUB_ENV
           echo "PLATFORM=${PLATFORM}" >> $GITHUB_ENV
-          echo "TARGET_REGISTRY=${TARGET_REGISTRY}" >> $GITHUB_ENV
+          echo "TARGET_REGISTRY=${REGISTRY}" >> $GITHUB_ENV
 
       - name: Clean up Docker space before pull
         run: |
@@ -84,8 +59,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.TARGET_REGISTRY }}
-          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
-          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
 
       - name: Pull and push image (with cleanup)
         run: |
