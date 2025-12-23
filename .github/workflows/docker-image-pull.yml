@@ -1,169 +1,151 @@
-name: Docker Image CI Pull
+name: Sync Docker Images to Aliyun
 
 on:
-  workflow_dispatch:  # 允许手动触发工作流
+  workflow_dispatch:
+    inputs:
+      image_name:
+        description: 'Image name to sync (e.g., ragflow)'
+        required: true
+        type: string
+      image_tag:
+        description: 'Image tag (e.g., v0.9.0)'
+        required: true
+        type: string
+      source_registry:
+        description: 'Source registry (default: docker.io)'
+        required: false
+        default: 'docker.io'
+        type: string
+      target_registry:
+        description: 'Target Aliyun registry'
+        required: true
+        type: string
+      target_namespace:
+        description: 'Target namespace'
+        required: true
+        type: string
+      platform:
+        description: 'Platform (e.g., linux/amd64, linux/arm64)'
+        required: false
+        default: 'linux/amd64'
+        type: string
+
+env:
+  DOCKER_CLI_EXPERIMENTAL: enabled
 
 jobs:
-  build:
+  sync-image:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false  # 允许单个镜像失败不影响其他镜像
-      matrix:
-        architecture: [amd64]
-        service:
-          # 核心服务镜像
-          - name: ragflow
-            source: infiniflow/ragflow
-            tag: v0.9.0
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Initial Docker cleanup
+      - name: Set up variables
+        id: vars
         run: |
-          echo "=== 初始清理 Docker 空间 ==="
+          SOURCE_REGISTRY="${{ inputs.source_registry }}"
+          IMAGE_NAME="${{ inputs.image_name }}"
+          IMAGE_TAG="${{ inputs.image_tag }}"
+          TARGET_REGISTRY="${{ inputs.target_registry }}"
+          TARGET_NAMESPACE="${{ inputs.target_namespace }}"
+          PLATFORM="${{ inputs.platform }}"
+          
+          # 构建源镜像名称
+          if [ "$SOURCE_REGISTRY" = "docker.io" ]; then
+            SOURCE_IMAGE="infiniflow/${IMAGE_NAME}:${IMAGE_TAG}"
+          else
+            SOURCE_IMAGE="${SOURCE_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          fi
+          
+          # 构建目标镜像名称（从 platform 中提取架构，如 linux/amd64 -> amd64）
+          ARCH="${PLATFORM#linux/}"
+          TARGET_IMAGE="${TARGET_REGISTRY}/${TARGET_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}-${ARCH}"
+          
+          echo "SOURCE_IMAGE=${SOURCE_IMAGE}" >> $GITHUB_ENV
+          echo "TARGET_IMAGE=${TARGET_IMAGE}" >> $GITHUB_ENV
+          echo "PLATFORM=${PLATFORM}" >> $GITHUB_ENV
+          echo "TARGET_REGISTRY=${TARGET_REGISTRY}" >> $GITHUB_ENV
+
+      - name: Clean up Docker space before pull
+        run: |
+          echo "=== 清理 Docker 空间 ==="
+          # 清理未使用的容器
           docker container prune -f || true
+          # 清理未使用的镜像
           docker image prune -a -f || true
+          # 清理构建缓存
           docker builder prune -a -f || true
+          # 清理未使用的卷
           docker volume prune -f || true
+          # 清理未使用的网络
           docker network prune -f || true
-          echo "=== 磁盘使用情况 ==="
+          # 显示磁盘使用情况
           df -h
           docker system df
-      
+
       - name: Login to Aliyun Container Registry
         uses: docker/login-action@v3
         with:
-          registry: crpi-ula1bfbb1264p5ln.cn-hangzhou.personal.cr.aliyuncs.com
-          username: ${{ secrets.ALIYUN_USERNAME }}
-          password: ${{ secrets.ALIYUN_PASSWORD }}
+          registry: ${{ env.TARGET_REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
 
-      - name: Pull and push Docker image
-        continue-on-error: true
+      - name: Pull and push image (with cleanup)
         run: |
           set +e
-          
-          ARCHITECTURE="${{ matrix.architecture }}"
-          REGISTRY="crpi-ula1bfbb1264p5ln.cn-hangzhou.personal.cr.aliyuncs.com"
-          NAMESPACE="muagent_gz"
-          
-          # 处理包含完整 registry 路径的镜像（如 quay.io/minio/minio）
-          SOURCE_IMAGE="${{ matrix.service.source }}:${{ matrix.service.tag }}"
-          
-          # 生成目标镜像名称（处理特殊字符，如 RELEASE.2025-06-13T11-33-47Z）
-          # 对于包含特殊字符的标签，使用原始标签
-          TARGET_TAG="${{ matrix.service.tag }}-${ARCHITECTURE}"
-          TARGET_IMAGE="${REGISTRY}/${NAMESPACE}/${{ matrix.service.name }}:${TARGET_TAG}"
-          
-          echo "=========================================="
-          echo "Processing: ${{ matrix.service.name }}"
-          echo "Source Image: $SOURCE_IMAGE"
-          echo "Target Image: $TARGET_IMAGE"
-          echo "Platform: linux/${ARCHITECTURE}"
-          echo "Registry: ${REGISTRY}"
-          echo "Namespace: ${NAMESPACE}"
-          echo "=========================================="
-          
-          # 验证镜像路径格式
-          if [[ "$SOURCE_IMAGE" == *"ghcr.io"* ]] || [[ "$SOURCE_IMAGE" == *"codefuse-ai"* ]]; then
-            echo "❌ ERROR: Invalid source image path detected: $SOURCE_IMAGE"
-            echo "Expected format: infiniflow/ragflow:v0.9.0"
-            exit 1
-          fi
-          
-          # 拉取源镜像，添加重试机制和空间清理
           MAX_RETRIES=3
           RETRY_COUNT=0
-          PULL_SUCCESS=false
           
           while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            # 重试前清理空间（第一次已经在初始清理中完成）
+            echo "=== 尝试拉取镜像 (第 $((RETRY_COUNT + 1)) 次) ==="
+            
+            # 清理空间（每次重试前都清理）
             if [ $RETRY_COUNT -gt 0 ]; then
-              echo "=== 重试前清理 Docker 空间 ==="
+              echo "清理 Docker 空间..."
               docker system prune -a -f --volumes || true
-              echo "=== 当前磁盘使用情况 ==="
               df -h
-              docker system df
-              sleep 5
             fi
             
-            echo "Attempting to pull: $SOURCE_IMAGE (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)"
-            
-            # 使用 --platform 参数只拉取指定架构，减少空间占用
-            if docker pull --platform linux/${ARCHITECTURE} "$SOURCE_IMAGE"; then
-              echo "✅ Successfully pulled: $SOURCE_IMAGE"
-              PULL_SUCCESS=true
-              break
+            # 使用 --platform 参数只拉取指定平台，减少空间占用
+            if docker pull --platform ${{ env.PLATFORM }} ${{ env.SOURCE_IMAGE }}; then
+              echo "✓ 镜像拉取成功"
+              
+              # 立即标记为目标镜像
+              docker tag ${{ env.SOURCE_IMAGE }} ${{ env.TARGET_IMAGE }}
+              
+              # 推送到阿里云
+              echo "=== 推送镜像到阿里云 ==="
+              if docker push ${{ env.TARGET_IMAGE }}; then
+                echo "✓ 镜像推送成功"
+                
+                # 推送成功后立即删除本地镜像以释放空间
+                echo "=== 清理本地镜像 ==="
+                docker rmi ${{ env.SOURCE_IMAGE }} ${{ env.TARGET_IMAGE }} || true
+                docker system prune -f || true
+                
+                echo "✓ 镜像同步完成"
+                exit 0
+              else
+                echo "✗ 镜像推送失败"
+                docker rmi ${{ env.SOURCE_IMAGE }} ${{ env.TARGET_IMAGE }} || true
+                exit 1
+              fi
             else
+              echo "✗ 镜像拉取失败"
               RETRY_COUNT=$((RETRY_COUNT + 1))
+              
               if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                echo "⚠️ Pull failed, retrying ($RETRY_COUNT/$MAX_RETRIES)..."
+                echo "等待 10 秒后重试..."
                 sleep 10
-              else
-                echo "❌ Failed to pull $SOURCE_IMAGE after $MAX_RETRIES attempts"
-                echo "Please verify the image exists at: https://hub.docker.com/r/${{ matrix.service.source }}"
-                exit 1
               fi
             fi
           done
           
-          if [ "$PULL_SUCCESS" = false ]; then
-            echo "❌ Failed to pull image after all retries"
-            exit 1
-          fi
-          
-          # 标记镜像
-          echo "=== 标记镜像 ==="
-          docker tag "$SOURCE_IMAGE" "$TARGET_IMAGE"
-          echo "✅ Tagged: $TARGET_IMAGE"
-          
-          # 推送镜像到阿里云，添加重试机制
-          echo "=== 推送镜像到阿里云 ==="
-          RETRY_COUNT=0
-          PUSH_SUCCESS=false
-          
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            echo "Attempting to push: $TARGET_IMAGE (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)"
-            if docker push "$TARGET_IMAGE"; then
-              echo "✅ Successfully pushed: $TARGET_IMAGE"
-              PUSH_SUCCESS=true
-              break
-            else
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                echo "⚠️ Push failed, retrying ($RETRY_COUNT/$MAX_RETRIES)..."
-                sleep 5
-              else
-                echo "❌ Failed to push $TARGET_IMAGE after $MAX_RETRIES attempts"
-                # 推送失败时也清理本地镜像
-                docker rmi "$SOURCE_IMAGE" "$TARGET_IMAGE" || true
-                exit 1
-              fi
-            fi
-          done
-          
-          if [ "$PUSH_SUCCESS" = true ]; then
-            # 推送成功后立即删除本地镜像以释放空间
-            echo "=== 清理本地镜像（推送成功） ==="
-            docker rmi "$SOURCE_IMAGE" "$TARGET_IMAGE" || true
-            # 清理未使用的资源
-            docker system prune -f || true
-            echo "✅ Completed: ${{ matrix.service.name }}"
-            echo "=== 清理后磁盘使用情况 ==="
-            df -h
-            docker system df
-          else
-            echo "❌ Failed to push image after all retries"
-            exit 1
-          fi
+          echo "✗ 镜像拉取失败，已重试 $MAX_RETRIES 次"
+          exit 1
 
       - name: Final cleanup
         if: always()
         run: |
-          echo "=== 最终清理 Docker 系统 ==="
+          echo "=== 最终清理 ==="
           docker system prune -a -f --volumes || true
-          echo "=== 最终磁盘使用情况 ==="
           df -h
           docker system df
-          echo "✅ Cleanup completed"
 
