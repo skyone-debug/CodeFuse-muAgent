@@ -1,126 +1,126 @@
-name: Sync Docker Images to Aliyun
+name: Docker Image CI Pull (Skopeo - Recommended)
 
 on:
   workflow_dispatch:  # 允许手动触发工作流
 
-env:
-  DOCKER_CLI_EXPERIMENTAL: enabled
-
 jobs:
-  sync-image:
+  build:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: false  # 允许单个镜像失败不影响其他镜像
       matrix:
         architecture: [amd64]
         service:
+          # 核心服务镜像
           - name: ragflow
             source: infiniflow/ragflow
             tag: v0.9.0
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install Skopeo
+        run: |
+          echo "=== 安装 Skopeo ==="
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+          skopeo --version
+      
+      - name: Clean up system space
+        run: |
+          echo "=== 清理系统空间 ==="
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* || true
+          docker system prune -a -f --volumes || true
+          echo "=== 磁盘使用情况 ==="
+          df -h
+          docker system df
+      
       - name: Set up variables
         run: |
-          # 硬编码的配置
+          ARCHITECTURE="${{ matrix.architecture }}"
           REGISTRY="crpi-ula1bfbb1264p5ln.cn-hangzhou.personal.cr.aliyuncs.com"
           NAMESPACE="muagent_gz"
-          ARCHITECTURE="${{ matrix.architecture }}"
-          PLATFORM="linux/${ARCHITECTURE}"
           
-          # 构建源镜像名称
-          SOURCE_IMAGE="${{ matrix.service.source }}:${{ matrix.service.tag }}"
+          # 构建源镜像路径
+          SOURCE_IMAGE="docker://docker.io/${{ matrix.service.source }}:${{ matrix.service.tag }}"
           
-          # 构建目标镜像名称
+          # 构建目标镜像路径
           TARGET_TAG="${{ matrix.service.tag }}-${ARCHITECTURE}"
-          TARGET_IMAGE="${REGISTRY}/${NAMESPACE}/${{ matrix.service.name }}:${TARGET_TAG}"
+          TARGET_IMAGE="docker://${REGISTRY}/${NAMESPACE}/${{ matrix.service.name }}:${TARGET_TAG}"
           
           echo "SOURCE_IMAGE=${SOURCE_IMAGE}" >> $GITHUB_ENV
           echo "TARGET_IMAGE=${TARGET_IMAGE}" >> $GITHUB_ENV
-          echo "PLATFORM=${PLATFORM}" >> $GITHUB_ENV
-          echo "TARGET_REGISTRY=${REGISTRY}" >> $GITHUB_ENV
+          echo "ARCHITECTURE=${ARCHITECTURE}" >> $GITHUB_ENV
+          echo "REGISTRY=${REGISTRY}" >> $GITHUB_ENV
+          echo "NAMESPACE=${NAMESPACE}" >> $GITHUB_ENV
+          
+          echo "=========================================="
+          echo "Processing: ${{ matrix.service.name }}"
+          echo "Source Image: ${SOURCE_IMAGE}"
+          echo "Target Image: ${TARGET_IMAGE}"
+          echo "Architecture: ${ARCHITECTURE}"
+          echo "Registry: ${REGISTRY}"
+          echo "Namespace: ${NAMESPACE}"
+          echo "=========================================="
 
-      - name: Clean up Docker space before pull
-        run: |
-          echo "=== 清理 Docker 空间 ==="
-          # 清理未使用的容器
-          docker container prune -f || true
-          # 清理未使用的镜像
-          docker image prune -a -f || true
-          # 清理构建缓存
-          docker builder prune -a -f || true
-          # 清理未使用的卷
-          docker volume prune -f || true
-          # 清理未使用的网络
-          docker network prune -f || true
-          # 显示磁盘使用情况
-          df -h
-          docker system df
-
-      - name: Login to Aliyun Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.TARGET_REGISTRY }}
-          username: ${{ secrets.ALIYUN_USERNAME }}
-          password: ${{ secrets.ALIYUN_PASSWORD }}
-
-      - name: Pull and push image (with cleanup)
+      - name: Sync image using Skopeo (streaming)
         run: |
           set +e
           MAX_RETRIES=3
           RETRY_COUNT=0
           
           while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            echo "=== 尝试拉取镜像 (第 $((RETRY_COUNT + 1)) 次) ==="
+            echo "=== 尝试同步镜像 (第 $((RETRY_COUNT + 1))/$MAX_RETRIES 次) ==="
             
-            # 清理空间（每次重试前都清理）
-            if [ $RETRY_COUNT -gt 0 ]; then
-              echo "清理 Docker 空间..."
-              docker system prune -a -f --volumes || true
-              df -h
-            fi
-            
-            # 使用 --platform 参数只拉取指定平台，减少空间占用
-            if docker pull --platform ${{ env.PLATFORM }} ${{ env.SOURCE_IMAGE }}; then
-              echo "✓ 镜像拉取成功"
+            # Skopeo 可以直接在源和目标之间流式传输，不需要本地存储完整镜像
+            # 这大大减少了磁盘空间占用
+            if skopeo copy \
+              --src-tls-verify=false \
+              --dest-tls-verify=false \
+              --dest-username="${{ secrets.ALIYUN_USERNAME }}" \
+              --dest-password="${{ secrets.ALIYUN_PASSWORD }}" \
+              --override-arch=${ARCHITECTURE} \
+              --override-os=linux \
+              ${SOURCE_IMAGE} \
+              ${TARGET_IMAGE}; then
               
-              # 立即标记为目标镜像
-              docker tag ${{ env.SOURCE_IMAGE }} ${{ env.TARGET_IMAGE }}
-              
-              # 推送到阿里云
-              echo "=== 推送镜像到阿里云 ==="
-              if docker push ${{ env.TARGET_IMAGE }}; then
-                echo "✓ 镜像推送成功"
-                
-                # 推送成功后立即删除本地镜像以释放空间
-                echo "=== 清理本地镜像 ==="
-                docker rmi ${{ env.SOURCE_IMAGE }} ${{ env.TARGET_IMAGE }} || true
-                docker system prune -f || true
-                
-                echo "✓ 镜像同步完成"
-                exit 0
-              else
-                echo "✗ 镜像推送失败"
-                docker rmi ${{ env.SOURCE_IMAGE }} ${{ env.TARGET_IMAGE }} || true
-                exit 1
-              fi
+              echo "✅ Successfully synced: ${{ matrix.service.name }}"
+              echo "✅ Source: ${SOURCE_IMAGE}"
+              echo "✅ Target: ${TARGET_IMAGE}"
+              exit 0
             else
-              echo "✗ 镜像拉取失败"
               RETRY_COUNT=$((RETRY_COUNT + 1))
-              
               if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                echo "等待 10 秒后重试..."
+                echo "⚠️ Sync failed, retrying ($RETRY_COUNT/$MAX_RETRIES)..."
+                # 清理可能的临时文件
+                sudo rm -rf /tmp/skopeo-* || true
                 sleep 10
+              else
+                echo "❌ Failed to sync after $MAX_RETRIES attempts"
+                exit 1
               fi
             fi
           done
           
-          echo "✗ 镜像拉取失败，已重试 $MAX_RETRIES 次"
           exit 1
+
+      - name: Verify synced image
+        run: |
+          echo "=== 验证同步的镜像 ==="
+          # 使用 skopeo inspect 验证镜像是否存在
+          skopeo inspect \
+            --tls-verify=false \
+            --creds="${{ secrets.ALIYUN_USERNAME }}:${{ secrets.ALIYUN_PASSWORD }}" \
+            ${TARGET_IMAGE} || echo "⚠️ 无法验证镜像，但可能已成功同步"
 
       - name: Final cleanup
         if: always()
         run: |
           echo "=== 最终清理 ==="
+          sudo rm -rf /tmp/skopeo-* || true
           docker system prune -a -f --volumes || true
+          echo "=== 最终磁盘使用情况 ==="
           df -h
           docker system df
 
