@@ -14,7 +14,7 @@ jobs:
           # 核心服务镜像
           - name: ragflow
             source: infiniflow/ragflow
-            tag: v0.9.0
+            tag: v0.22.1
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
