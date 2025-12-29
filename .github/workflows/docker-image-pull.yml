@@ -12,9 +12,9 @@ jobs:
         architecture: [amd64]
         service:
           # 核心服务镜像
-          - name: ragflow
-            source: infiniflow/ragflow
-            tag: v0.22.1
+          - name: open_notebook
+            source: lfnovo/open_notebook
+            tag: v1-latest-single
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
